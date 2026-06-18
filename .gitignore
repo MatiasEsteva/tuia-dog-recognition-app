@@ -13,6 +13,7 @@ models/*
 *.onnx
 *.engine
 data/dataset/*
+src/data/dataset/*
 !data/dataset/.gitkeep
 runs/
 .DS_Store

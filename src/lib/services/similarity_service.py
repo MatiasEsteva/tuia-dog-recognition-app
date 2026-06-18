@@ -68,7 +68,45 @@ class SimilarityService:
           - Recordar que la imagen llega en BGR (OpenCV).
         Retorna una lista de floats de dimension EMBEDDING_DIM.
         """
-        raise NotImplementedError("Etapa 1: implementar extract_embedding")
+        import torch
+        import torchvision.transforms as T
+        from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+
+
+        weights = EfficientNet_B0_Weights.IMAGENET1K_V1
+        backbone = efficientnet_b0(weights=weights)
+        # Remover la capa de clasificación — quedarse solo con el feature extractor
+        # avgpool produce (batch, 1280) que es el embedding
+        backbone.classifier = torch.nn.Identity()
+        backbone.eval()
+        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._model = backbone.to(self._device)
+
+        # Transformaciones estándar de ImageNet
+        self._transform = T.Compose([
+            T.ToPILImage(),
+            T.Resize((self.image_size, self.image_size)),
+            T.ToTensor(),
+            # Normalización con media y desvío de ImageNet por canal RGB
+            T.Normalize(mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225])])
+
+        # Convertir BGR → RGB (OpenCV usa BGR por convención)
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Aplicar transformaciones y agregar dimensión de batch: (C,H,W) → (1,C,H,W)
+        tensor = self._transform(image_rgb).unsqueeze(0).to(self._device)
+
+        with torch.no_grad():
+            embedding = self._model(tensor)  # (1, 1280)
+
+        # squeeze elimina la dimensión de batch: (1, 1280) → (1280,)
+        emb = embedding.squeeze().cpu().numpy()
+
+        # Normalización L2: con ||emb||=1, similitud coseno = producto punto
+        emb = emb / (np.linalg.norm(emb) + 1e-8)
+
+        return emb.tolist()
 
     def search_similar_images(self, embedding: list[float], top_k: int) -> list[Neighbor]:
         """
@@ -81,7 +119,23 @@ class SimilarityService:
         Retorna una lista de Neighbor (path, breed, score) ordenada por score
         descendente.
         """
-        raise NotImplementedError("Etapa 1: implementar search_similar_images")
+        # search() de pgvector devuelve registros ordenados por distancia coseno
+        import numpy as np
+        records = self.store.search(np.array(embedding, dtype=np.float32), top_k)
+
+        neighbors = []
+        for record in records:
+            # Calcular score de similitud (coseno o L2 según configuración)
+            score = self.similarity(embedding, record.embedding)
+            neighbors.append(Neighbor(
+                path=record.path,
+                breed=record.breed,
+                score=round(score, 4),
+            ))
+
+        # Ordenar por score descendente (mayor similitud primero)
+        neighbors.sort(key=lambda n: n.score, reverse=True)
+        return neighbors
 
     def predict_breed_from_neighbors(self, results: list[Neighbor]) -> tuple[str, float]:
         """
@@ -91,7 +145,28 @@ class SimilarityService:
         Si el mejor score esta por debajo de self.similarity_threshold se
         considera "unknown". Retorna (raza, score).
         """
-        raise NotImplementedError("Etapa 1: implementar predict_breed_from_neighbors")
+        if not results:
+            return "unknown", 0.0
+
+        # Verificar si el vecino más cercano supera el threshold mínimo
+        best_score = results[0].score
+        if best_score < self.similarity_threshold:
+            return "unknown", best_score
+
+        # Votación ponderada: acumular scores por raza
+        votes: dict[str, float] = {}
+        for neighbor in results:
+            votes[neighbor.breed] = votes.get(neighbor.breed, 0.0) + neighbor.score
+
+        # La raza con mayor peso acumulado es la predicha
+        predicted_breed = max(votes, key=votes.__getitem__)
+
+        # El score reportado es el score del mejor vecino de esa raza
+        breed_score = max(
+            n.score for n in results if n.breed == predicted_breed
+        )
+
+        return predicted_breed, breed_score
 
     # ------------------------------------------------------------------
     # Helpers de similitud provistos
@@ -127,7 +202,7 @@ class SimilarityService:
         record = EmbeddingRecord(
             id_imagen=str(uuid4()),
             embedding=embedding,
-            path=str(image_path),
+            path=Path(image_path).as_posix(), #path=str(image_path),
             breed=breed,
             metadata=metadata or {},
         )
