@@ -3,12 +3,75 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
-
+import torch.nn as nn
 import numpy as np
 import torch
 import onnxruntime
 
 logger = logging.getLogger(__name__)
+
+
+
+# CNN custom 
+
+class _DogCNN(nn.Module):
+    def __init__(self, n_clases: int, dropout_rate: float = 0.4):
+        super().__init__()
+        self.backbone = nn.Sequential(
+            # Bloque 1 (224×224 → 112×112)
+            nn.Conv2d(3, 32, kernel_size=5, padding=2, bias=False),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 32, kernel_size=5, padding=2, bias=False),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            # Bloque 2 (112×112 → 56×56)
+            nn.Conv2d(32, 64, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            # Bloque 3 (56×56 → 28×28)
+            nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            # Bloque 4 (28×28 → 14×14)
+            nn.Conv2d(128, 256, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(256), nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(256), nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            # Bloque 5 (14×14 → 7×7)
+            nn.Conv2d(256, 512, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(512), nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(512), nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        self.cabeza = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(512, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout_rate),
+            nn.Linear(128, n_clases),
+        )
+        # Inicialización Kaiming
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        return self.cabeza(self.backbone(x))
 
 
 class ClassifierService:
@@ -162,24 +225,10 @@ class ClassifierService:
         if self.active_model_name == "resnet18_finetuned":
             model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
             model.fc = nn.Linear(model.fc.in_features, num_classes)
+
         elif self.active_model_name == "cnn_custom":
-            def conv_block(in_ch, out_ch):
-                return nn.Sequential(
-                    nn.Conv2d(in_ch, out_ch, 3, padding=1),
-                    nn.BatchNorm2d(out_ch),
-                    nn.ReLU(inplace=True),
-                    nn.MaxPool2d(2),
-                )
-            model = nn.Sequential(
-                conv_block(3,   32),
-                conv_block(32,  64),
-                conv_block(64, 128),
-                conv_block(128, 256),
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Dropout(0.4),
-                nn.Linear(256, num_classes),
-            )
+            model = _DogCNN(n_clases=num_classes, dropout_rate=0.4)
+
         else:
             raise ValueError(f"Modelo no soportado: {self.active_model_name}")
 
@@ -234,6 +283,11 @@ class ClassifierService:
             history["train_acc"].append(train_acc)
             history["val_acc"].append(val_acc)
 
+            print(
+                f"Epoch {epoch+1}/{EPOCHS} — "
+                f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
+                f"val_loss={val_loss:.4f} val_acc={val_acc:.4f}")
+            
             logger.info(
                 f"Epoch {epoch+1}/{EPOCHS} — "
                 f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
@@ -250,7 +304,7 @@ class ClassifierService:
                     "image_size":    self.image_size,
                     "model_name":    self.active_model_name,
                 }, self.active_checkpoint)
-                logger.info(f"  ✓ Checkpoint guardado (val_acc={val_acc:.4f})")
+                logger.info(f" Checkpoint guardado (val_acc={val_acc:.4f})")
 
         logger.info(f"Entrenamiento finalizado. Mejor val_acc: {best_val_acc:.4f}")
 
@@ -388,9 +442,10 @@ class ClassifierService:
         if self.active_model_name == "resnet18_finetuned":
             # Quitamos la fc final → embedding de 512 dims
             embedding_model = nn.Sequential(*list(model.children())[:-1], nn.Flatten())
+
         elif self.active_model_name == "cnn_custom":
-            # Quitamos la Linear final (último elemento del Sequential)
-            embedding_model = model[:-1]   # hasta Dropout inclusive → 256 dims
+            embedding = model.backbone(tensor).squeeze().cpu().numpy()
+            
         else:
             raise ValueError(f"Modelo no soportado: {self.active_model_name}")
 
