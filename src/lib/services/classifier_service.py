@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # CNN custom 
 
-class _DogCNN(nn.Module):
+class CNN_custom(nn.Module):
     def __init__(self, n_clases: int, dropout_rate: float = 0.4):
         super().__init__()
         self.backbone = nn.Sequential(
@@ -59,16 +59,6 @@ class _DogCNN(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(128, n_clases),
         )
-        # Inicialización Kaiming
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
-                nn.init.zeros_(m.bias)
 
     def forward(self, x):
         return self.cabeza(self.backbone(x))
@@ -215,8 +205,8 @@ class ClassifierService:
         sample_weights = [1.0 / class_counts[l] for l in labels]
         sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
 
-        train_loader = DataLoader(train_ds, batch_size=32, sampler=sampler, num_workers=0)
-        val_loader   = DataLoader(val_ds,   batch_size=32, shuffle=False,   num_workers=0)
+        train_loader = DataLoader(train_ds, batch_size=128, sampler=sampler, num_workers=0)
+        val_loader   = DataLoader(val_ds,   batch_size=128, shuffle=False,   num_workers=0)
 
         # Modelo
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -227,7 +217,7 @@ class ClassifierService:
             model.fc = nn.Linear(model.fc.in_features, num_classes)
 
         elif self.active_model_name == "cnn_custom":
-            model = _DogCNN(n_clases=num_classes, dropout_rate=0.4)
+            model = CNN_custom(n_clases=70, dropout_rate=0.4)
 
         else:
             raise ValueError(f"Modelo no soportado: {self.active_model_name}")
@@ -238,11 +228,15 @@ class ClassifierService:
         # Loss con pesos por clase
         class_weights = torch.tensor(1.0 / class_counts, dtype=torch.float).to(device)
         criterion = nn.CrossEntropyLoss(weight=class_weights)
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
+        optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
 
         # Loop entrenamiento
-        EPOCHS = 20
+        if self.active_model_name == "resnet18_finetuned":
+            EPOCHS = 20
+        elif self.active_model_name == "cnn_custom":
+            EPOCHS = 100
+            
         best_val_acc = 0.0
         history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
 
@@ -282,11 +276,6 @@ class ClassifierService:
             history["val_loss"].append(val_loss)
             history["train_acc"].append(train_acc)
             history["val_acc"].append(val_acc)
-
-            print(
-                f"Epoch {epoch+1}/{EPOCHS} — "
-                f"train_loss={train_loss:.4f} train_acc={train_acc:.4f} "
-                f"val_loss={val_loss:.4f} val_acc={val_acc:.4f}")
             
             logger.info(
                 f"Epoch {epoch+1}/{EPOCHS} — "
@@ -373,7 +362,7 @@ class ClassifierService:
                 return img, label
 
         test_ds     = DogDataset(self.dataset_path / "test", class_to_idx, val_transform)
-        test_loader = DataLoader(test_ds, batch_size=32, shuffle=False, num_workers=0)
+        test_loader = DataLoader(test_ds, batch_size=128, shuffle=False, num_workers=0)
 
         all_preds, all_labels = [], []
         with torch.no_grad():
@@ -426,44 +415,5 @@ class ClassifierService:
         La imagen llega en BGR (OpenCV). Retorna una lista de floats de
         dimension EMBEDDING_DIM.
         """
-        import torch
-        import torch.nn as nn
-        from torchvision import transforms
-        from PIL import Image
-        import cv2
 
-        checkpoint   = self.load_model()
-        model        = checkpoint["model"]
-        image_size   = checkpoint.get("image_size", self.image_size)
-
-        # Extraer penúltima capa según arquitectura
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        if self.active_model_name == "resnet18_finetuned":
-            # Quitamos la fc final → embedding de 512 dims
-            embedding_model = nn.Sequential(*list(model.children())[:-1], nn.Flatten())
-
-        elif self.active_model_name == "cnn_custom":
-            embedding = model.backbone(tensor).squeeze().cpu().numpy()
-            
-        else:
-            raise ValueError(f"Modelo no soportado: {self.active_model_name}")
-
-        embedding_model = embedding_model.to(device)
-        embedding_model.eval()
-
-        # Imagen BGR (OpenCV) → RGB → tensor normalizado
-        transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-
-        img_rgb    = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        pil_img    = Image.fromarray(img_rgb)
-        tensor     = transform(pil_img).unsqueeze(0).to(device)
-
-        with torch.no_grad():
-            embedding = embedding_model(tensor).squeeze().cpu().numpy()
-
-        return embedding.tolist()
+        raise NotImplementedError("Etapa 2: implementar extract_custom_embedding")

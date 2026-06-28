@@ -75,7 +75,24 @@ class DetectionService:
 
         Retorna una lista de ((x1, y1, x2, y2), confidence) en pixeles.
         """
-        raise NotImplementedError("Etapa 3: implementar detect_dogs")
+
+
+        from ultralytics import YOLO
+
+        model = YOLO(self.yolo_model_name)  # descarga automática si no existe localmente
+        results = model(image, conf=self.conf_threshold, verbose=False)
+
+        detections = []
+        for result in results:
+            for box in result.boxes:
+                if int(box.cls) != self.dog_class_id:
+                    continue
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                confidence = float(box.conf)
+                detections.append(((int(x1), int(y1), int(x2), int(y2)), confidence))
+
+        logger.info(f"detect_dogs: {len(detections)} perro(s) detectado(s)")
+        return detections
 
     def classify_detected_dog(self, crop: np.ndarray) -> tuple[str, float]:
         """
@@ -84,7 +101,44 @@ class DetectionService:
 
         El recorte llega en BGR (OpenCV). Retorna (raza, score).
         """
-        raise NotImplementedError("Etapa 3: implementar classify_detected_dog")
+        import torch
+        from torchvision import transforms
+        from PIL import Image
+        import cv2
+
+        try:
+            checkpoint  = self.classifier.load_model()
+            model       = checkpoint["model"]
+            class_to_idx = checkpoint["class_to_idx"]
+            image_size  = checkpoint.get("image_size", self.classifier.image_size)
+        except Exception as e:
+            logger.warning(f"classify_detected_dog: no se pudo cargar el modelo — {e}")
+            return "unknown", 0.0
+
+        idx_to_class = {v: k for k, v in class_to_idx.items()}
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model  = model.to(device)
+        model.eval()
+
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+
+        # BGR (OpenCV) → RGB → PIL → tensor
+        img_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        tensor  = transform(Image.fromarray(img_rgb)).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+            logits = model(tensor)
+            probs  = torch.softmax(logits, dim=1)
+            score, pred = probs.max(dim=1)
+
+        breed = idx_to_class[pred.item()]
+        logger.info(f"classify_detected_dog: {breed} ({score.item():.4f})")
+        return breed, score.item()
 
     # ------------------------------------------------------------------
     # Orquestacion provista

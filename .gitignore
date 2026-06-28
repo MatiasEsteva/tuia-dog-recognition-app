@@ -13,6 +13,8 @@ models/*
 *.onnx
 *.engine
 data/dataset/*
+data/pruebas/
+data/pruebas_multiples/
 src/data/dataset/*
 !data/dataset/.gitkeep
 runs/
