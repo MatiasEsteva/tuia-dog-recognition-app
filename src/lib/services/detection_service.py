@@ -79,7 +79,7 @@ class DetectionService:
 
         from ultralytics import YOLO
 
-        model = YOLO(self.yolo_model_name)  # descarga automática si no existe localmente
+        model = YOLO(self.yolo_model_name)
         results = model(image, conf=self.conf_threshold, verbose=False)
 
         detections = []

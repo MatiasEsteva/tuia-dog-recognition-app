@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 # CNN custom 
-
 class CNN_custom(nn.Module):
     def __init__(self, n_clases: int, dropout_rate: float = 0.4):
         super().__init__()
@@ -323,7 +322,6 @@ class ClassifierService:
         class_to_idx = checkpoint["class_to_idx"]
         image_size   = checkpoint.get("image_size", self.image_size)
 
-        # Guardamos en self para que el notebook los grafique sin recargar
         self.history          = checkpoint.get("history", {})
         self.class_to_idx_    = class_to_idx
         self.idx_to_class_    = {v: k for k, v in class_to_idx.items()}
